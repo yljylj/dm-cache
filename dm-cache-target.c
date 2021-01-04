@@ -19,6 +19,7 @@
 #include <linux/vmalloc.h>
 
 #define DM_MSG_PREFIX "cache"
+#define PT printk(KERN_INFO "%s %s\n", current->comm, __func__)
 
 DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(cache_copy_throttle,
 	"A percentage of time allocated for copying to and/or from cache");
@@ -314,6 +315,7 @@ struct cache {
 	bool commit_requested:1;
 	bool loaded_mappings:1;
 	bool loaded_discards:1;
+	bool write_sync:1;
 
 	/*
 	 * Cache features such as write-through.
@@ -579,6 +581,9 @@ static void set_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbloc
 	if (!test_and_set_bit(from_cblock(cblock), cache->dirty_bitset)) {
 		atomic_inc(&cache->nr_dirty);
 		policy_set_dirty(cache->policy, oblock);
+		cache->write_sync = true;
+		wake_worker(cache);
+		//PT;
 	}
 }
 
@@ -1917,10 +1922,17 @@ static int need_commit_due_to_time(struct cache *cache)
 /*
  * A non-zero return indicates read_only or fail_io mode.
  */
+
+static int write_dirty_bitset(struct cache *cache);
+
 static int commit(struct cache *cache, bool clean_shutdown)
 {
 	int r;
-
+//	if (cache->write_sync){
+//		write_dirty_bitset(cache);
+//		cache->write_sync = false;
+//		return 0;
+//	}	
 	if (get_cache_mode(cache) >= CM_READ_ONLY)
 		return -EINVAL;
 
@@ -2242,8 +2254,11 @@ static int more_work(struct cache *cache)
 static void do_worker(struct work_struct *ws)
 {
 	struct cache *cache = container_of(ws, struct cache, worker);
-
 	do {
+		if (cache->write_sync){
+			write_dirty_bitset(cache);
+			cache->write_sync = false;
+		}
 		if (!is_quiescing(cache)) {
 			writeback_some_dirty_blocks(cache);
 			process_deferred_writethrough_bios(cache);
@@ -2251,10 +2266,9 @@ static void do_worker(struct work_struct *ws)
 			process_deferred_cells(cache);
 			process_invalidation_requests(cache);
 		}
-
+		
 		process_migrations(cache, &cache->quiesced_migrations, issue_copy_or_discard);
 		process_migrations(cache, &cache->completed_migrations, complete_migration);
-
 		if (commit_if_needed(cache)) {
 			process_deferred_flush_bios(cache, false);
 			process_migrations(cache, &cache->need_commit_migrations, migration_failure);
@@ -2267,6 +2281,7 @@ static void do_worker(struct work_struct *ws)
 		ack_quiescing(cache);
 
 	} while (more_work(cache));
+
 }
 
 /*
@@ -2930,6 +2945,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	cache->commit_requested = false;
 	cache->loaded_mappings = false;
 	cache->loaded_discards = false;
+	cache->write_sync = false;
 
 	load_stats(cache);
 
@@ -3016,7 +3032,6 @@ out:
 static int cache_map(struct dm_target *ti, struct bio *bio)
 {
 	struct cache *cache = ti->private;
-
 	int r;
 	struct dm_bio_prison_cell *cell = NULL;
 	dm_oblock_t block = get_bio_block(cache, bio);
