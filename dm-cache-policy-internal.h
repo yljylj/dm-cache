@@ -129,6 +129,12 @@ static inline void clear_bitset(void *bitset, unsigned nr_entries)
 	memset(bitset, 0, s);
 }
 
+static inline void clear_big_bitset(void *big_bitset, unsigned nr_entries)
+{
+	size_t s = nr_entries * sizeof(unsigned long);
+	memset(big_bitset, 0, s);
+}
+
 static inline void free_bitset(unsigned long *bits)
 {
 	vfree(bits);

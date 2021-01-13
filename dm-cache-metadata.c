@@ -35,6 +35,7 @@
  */
 #define CACHE_MAX_CONCURRENT_LOCKS 5
 #define SPACE_MAP_ROOT_SIZE 128
+#define PT printk(KERN_INFO "%s %s\n", current->comm, __func__)
 
 enum superblock_flag_bits {
 	/* for spotting crashes that would invalidate the dirty bitset */
@@ -56,7 +57,9 @@ enum mapping_bits {
 	/*
 	 * The data on the cache is different from that on the origin.
 	 */
-	M_DIRTY = 2
+	M_DIRTY = 2,
+
+	M_BIG_DIRTY = 4
 };
 
 struct cache_disk_superblock {
@@ -275,6 +278,7 @@ static void __setup_mapping_info(struct dm_cache_metadata *cmd)
 	vt.dec = NULL;
 	vt.equal = NULL;
 	dm_array_info_init(&cmd->info, cmd->tm, &vt);
+
 
 	if (cmd->policy_hint_size) {
 		vt.size = sizeof(__le32);
@@ -1071,8 +1075,25 @@ int dm_cache_size(struct dm_cache_metadata *cmd, dm_cblock_t *result)
 static int __remove(struct dm_cache_metadata *cmd, dm_cblock_t cblock)
 {
 	int r;
-	__le64 value = pack_value(0, 0);
+	dm_oblock_t oblock;
+	unsigned flags;
+	__le64 value;
+	/*write big info
+	r = dm_array_get_value(&cmd->info, cmd->root, from_cblock(cblock) / 100, &value);
+	if (r)
+		return r;
 
+	unpack_value(value, &oblock, &flags);
+
+	value = pack_value(&oblock, flags & (FLAGS_MASK - 4));
+	__dm_bless_for_disk(&value);
+	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock) / 100,
+			       &value, &cmd->root);
+	if (r)
+		return r;
+	end write big info*/
+
+	value = pack_value(0, 0);
 	__dm_bless_for_disk(&value);
 	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock),
 			       &value, &cmd->root);
@@ -1098,7 +1119,26 @@ static int __insert(struct dm_cache_metadata *cmd,
 		    dm_cblock_t cblock, dm_oblock_t oblock)
 {
 	int r;
-	__le64 value = pack_value(oblock, M_VALID);
+	dm_oblock_t o_oblock;
+	unsigned flags;
+	__le64 value;
+	/*write big info
+	r = dm_array_get_value(&cmd->info, cmd->root, from_cblock(oblock) / 100, &value);
+	if (r)
+		return r;
+
+	unpack_value(value, &o_oblock, &flags);
+
+	value = pack_value(&o_oblock, flags & (FLAGS_MASK- 4));
+	__dm_bless_for_disk(&value);
+	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock) / 100,
+			       &value, &cmd->root);
+	if (r)
+		return r;
+	end write big info*/
+
+
+	value = pack_value(oblock, M_VALID);
 	__dm_bless_for_disk(&value);
 
 	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(cblock),
@@ -1266,19 +1306,48 @@ int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd)
 	return r;
 }
 
+static int __big_dirty(struct dm_cache_metadata *cmd, dm_cblock_t oblock, bool dirty)
+{
+	int r;
+	unsigned flags;
+	dm_oblock_t o_oblock;
+	__le64 value;
+
+	r = dm_array_get_value(&cmd->info, cmd->root, from_cblock(oblock), &value);
+	if (r)
+		return r;
+
+	unpack_value(value, &o_oblock, &flags);
+
+	if (((flags & M_BIG_DIRTY) && dirty) || (!(flags & M_BIG_DIRTY) && !dirty))
+		/* nothing to be done */
+		return 0;
+
+	value = pack_value(o_oblock, (flags & ~M_BIG_DIRTY) | (dirty ? M_BIG_DIRTY : 0));
+	__dm_bless_for_disk(&value);
+
+	r = dm_array_set_value(&cmd->info, cmd->root, from_cblock(oblock) / 1000,
+			       &value, &cmd->root);
+	if (r)
+		return r;
+
+	//cmd->changed = true;
+	return 0;
+
+}
+
 static int __dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty)
 {
 	int r;
 	unsigned flags;
 	dm_oblock_t oblock;
 	__le64 value;
-
 	r = dm_array_get_value(&cmd->info, cmd->root, from_cblock(cblock), &value);
+	//printk("%")
 	if (r)
 		return r;
 
 	unpack_value(value, &oblock, &flags);
-
 	if (((flags & M_DIRTY) && dirty) || (!(flags & M_DIRTY) && !dirty))
 		/* nothing to be done */
 		return 0;
@@ -1300,9 +1369,19 @@ int dm_cache_set_dirty(struct dm_cache_metadata *cmd,
 		       dm_cblock_t cblock, bool dirty)
 {
 	int r;
-
 	WRITE_LOCK(cmd);
 	r = __dirty(cmd, cblock, dirty);
+	WRITE_UNLOCK(cmd);
+
+	return r;
+}
+
+int dm_cache_set_big_dirty(struct dm_cache_metadata *cmd,
+		       dm_cblock_t oblock, bool dirty)
+{
+	int r;
+	WRITE_LOCK(cmd);
+	r = __big_dirty(cmd, oblock, dirty);
 	WRITE_UNLOCK(cmd);
 
 	return r;
