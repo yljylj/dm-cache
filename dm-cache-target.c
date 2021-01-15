@@ -284,6 +284,8 @@ struct cache {
 	atomic_t nr_dirty;
 	unsigned long *dirty_bitset;
 	unsigned long *dirty_big_bitset;
+	bool *cbt;
+	bool *existing;
 
 	/*
 	 * origin_blocks entries, discarded if set.
@@ -597,8 +599,10 @@ static int inc_dirty_big_bitset(struct cache *cache, dm_oblock_t oblock)
 		return -EINVAL;
 
 	cache->dirty_big_bitset[oblock / BS]++;
-	//printk(KERN_INFO "%u  %u  %u\n", oblock, oblock / 1000, cache->dirty_big_bitset[oblock / 1000]);
+	//printk(KERN_INFO "%u  %u  %u\n", oblock, oblock / BS, cache->dirty_big_bitset[oblock / BS]);
+	
 	if (cache->dirty_big_bitset[oblock / BS] == 1) {
+		cache->k++;
 		r = dm_cache_set_big_dirty(cache->cmd, oblock / BS, true);
 		if (r) {
 			metadata_operation_failed(cache, "dm_cache_set_dirty_big", r);
@@ -631,19 +635,70 @@ static int dec_dirty_big_bitset(struct cache *cache, dm_oblock_t oblock)
 	return 0;
 }
 
+static void cbt_dirty(struct cache *cache, dm_oblock_t oblock) {
+	unsigned long shift;
+	int i;
+//	printk(KERN_INFO "dbg4 oblock %lu\n", oblock);
+	for (i = 0; i <= 20; i++) {
+		shift = (oblock >> i) + (1 << 20 - i) - 1;
+//		printk(KERN_INFO "dbg4 shift %lu\n", shift);
+		if (cache->cbt[shift])
+			return;
+		cache->cbt[shift] = true;
+	}
+}
+
+static void cbt_clear(struct cache *cache, dm_oblock_t oblock) {
+	unsigned long shift;
+	int i;
+//	printk(KERN_INFO "dbg4 c oblock %lu\n", oblock);
+	for (i = 0; i <= 20; i++) {
+		shift = (oblock >> i) + (1 << 20 - i) - 1;
+//		printk(KERN_INFO "dbg4 c shift %lu\n", shift);
+		if (i == 0)
+			cache->cbt[shift] = false;
+		else 
+			if (!cache->cbt[shift << 1] && !cache->cbt[(shift << 1) + 1])
+			cache->cbt[shift] = false;
+		else 
+			return;
+	}
+}
+
+static void set_abt_dirty(struct cache *cache, dm_oblock_t oblock)
+{
+	unsigned long shift;
+	int i;
+	for (i = 0; i <= 20; i++) {
+		shift = (oblock >> i) + (1 << 20 - i) - 1;
+		//printk(KERN_INFO "dbg4 shift %lu\n", shift);
+		//if (!cache->existing[shift]) {
+			cache->existing[shift] = true;
+			printk(KERN_INFO "%d  %d\n", shift / 30, shift % 30 + 2);
+			//dm_cache_set_abt_dirty(cache->cmd, shift / 30, shift % 30 + 2, true);
+		//	return;
+		//}
+	}
+}
 
 static void set_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cblock)
 {
-	//printk(KERN_INFO "%s  %s %u  %u\n", __func__, current->comm, oblock, cblock);
+
+	//printk(KERN_INFO "%s %d %d %d %d\n", current->comm, cache->cache_size, cache->sectors_per_block, oblock, cblock);
+	//printk(KERN_INFO "%d  %d\n", cache->origin_blocks, cache->origin_sectors);
 	if (!test_and_set_bit(from_cblock(cblock), cache->dirty_bitset)) {
+		//cbt_dirty(cache, oblock);
+		//printk(KERN_INFO "write small1 %d  %d\n", cache->k, cache->k2);
 		atomic_inc(&cache->nr_dirty);
 		policy_set_dirty(cache->policy, oblock);
-
+		
 		if (!strstr(current->comm, "kwork")) {
-			cache->k++;
 		}
 		else {
-			cache->k2++;
+			//dm_cache_set_dirty(cache->cmd, cblock, true);
+			//commit(cache, false);
+			printk(KERN_INFO "oblock  %d\n", oblock);
+			set_abt_dirty(cache, oblock);
 			//inc_dirty_big_bitset(cache, oblock);
 		}
 		
@@ -652,16 +707,16 @@ static void set_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cbloc
 
 static void clear_dirty(struct cache *cache, dm_oblock_t oblock, dm_cblock_t cblock)
 {
+
 	if (test_and_clear_bit(from_cblock(cblock), cache->dirty_bitset)) {
 		policy_clear_dirty(cache->policy, oblock);
 		if (atomic_dec_return(&cache->nr_dirty) == 0)
 			dm_table_event(cache->ti->table);
-	
+		//printk(KERN_INFO "qqqq\n");
+		//cbt_clear(cache, oblock);
 		if (!strstr(current->comm, "kwork")) {
-			cache->k++;
 		}
 		else {
-			cache->k2++;
 			//dec_dirty_big_bitset(cache, oblock);
 		}
 		
@@ -2038,7 +2093,6 @@ static int commit_if_needed(struct cache *cache)
 	//printk(KERN_INFO " request %d\n", cache->commit_requested);
 	if ((cache->commit_requested || need_commit_due_to_time(cache)) &&
 	    dm_cache_changed_this_transaction(cache->cmd)) {
-		printk(KERN_INFO "commit %d\n", need_commit_due_to_time(cache));
 		r = commit(cache, false);
 		cache->commit_requested = false;
 		cache->last_commit_jiffies = jiffies;
@@ -2632,7 +2686,7 @@ static int parse_block_size(struct cache_args *ca, struct dm_arg_set *as,
 		return -EINVAL;
 	}
 
-	ca->block_size = block_size;
+	ca->block_size = 256;
 
 	return 0;
 }
@@ -2977,12 +3031,16 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	atomic_set(&cache->nr_dirty, 0);
 	cache->dirty_bitset = alloc_bitset(from_cblock(cache->cache_size));
 	cache->dirty_big_bitset = vmalloc(sizeof(unsigned long) * cache->cache_size);
+	cache->cbt = vmalloc(sizeof(bool) * ((1 << 21) - 1));
+	cache->existing = vmalloc(sizeof(bool) * ((1 << 21) - 1));
 	if (!cache->dirty_bitset) {
 		*error = "could not allocate dirty bitset";
 		goto bad;
 	}
 	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
 	clear_big_bitset(cache->dirty_big_bitset, from_cblock(cache->cache_size));
+	clear_cbt(cache->cbt, sizeof(bool) * ((1 << 21) - 1));
+	clear_cbt(cache->existing, sizeof(bool) * ((1 << 21) - 1));
 	cache->discard_block_size =
 		calculate_discard_block_size(cache->sectors_per_block,
 					     cache->origin_sectors);
@@ -3374,7 +3432,6 @@ static bool sync_metadata(struct cache *cache)
 static void cache_postsuspend(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
-	printk(KERN_INFO "fffff\n");
 	start_quiescing(cache);
 	wait_for_migrations(cache);
 	stop_worker(cache);

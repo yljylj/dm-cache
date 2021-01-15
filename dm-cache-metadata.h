@@ -78,6 +78,8 @@ int dm_cache_load_discards(struct dm_cache_metadata *cmd,
 			   load_discard_fn fn, void *context);
 
 int dm_cache_set_discard(struct dm_cache_metadata *cmd, dm_dblock_t dblock, bool discard);
+int dm_cache_set_abt(struct dm_cache_metadata *cmd, dm_dblock_t dblock);
+int dm_cache_clear_abt(struct dm_cache_metadata *cmd, dm_dblock_t dblock);
 
 int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock);
 int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock, dm_oblock_t oblock);
@@ -93,6 +95,7 @@ int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
 
 int dm_cache_set_dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty);
 int dm_cache_set_big_dirty(struct dm_cache_metadata *cmd, dm_cblock_t cblock, bool dirty);
+int dm_cache_set_abt_dirty(struct dm_cache_metadata *cmd, dm_cblock_t oblock, int bit, bool dirty);
 
 
 struct dm_cache_statistics {

@@ -135,6 +135,10 @@ static inline void clear_big_bitset(void *big_bitset, unsigned nr_entries)
 	memset(big_bitset, 0, s);
 }
 
+static inline void clear_cbt(void *cbt, unsigned cbt_size) {
+	memset(cbt, 0, cbt_size);
+}
+
 static inline void free_bitset(unsigned long *bits)
 {
 	vfree(bits);
